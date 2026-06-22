@@ -1,0 +1,39 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>RaftMovableStorage</AssemblyName>
+    <Version>1.0.0</Version>
+    <LangVersion>latest</LangVersion>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <!-- No deps copied; everything is provided by the game / BepInEx at runtime -->
+    <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+
+    <!-- Absolute paths into the CrossOver "PEak" bottle. Override on CLI with -p:GameDir=... if it moves. -->
+    <GameDir Condition="'$(GameDir)' == ''">/Users/cyace84/Library/Application Support/CrossOver/Bottles/PEak/drive_c/Program Files (x86)/Steam/steamapps/common/Raft</GameDir>
+    <Managed>$(GameDir)/Raft_Data/Managed</Managed>
+    <BepCore>$(GameDir)/BepInEx/core</BepCore>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- Lets net48 build on macOS/Linux without a full .NET Framework install -->
+    <PackageReference Include="Microsoft.NETFramework.ReferenceAssemblies" Version="1.0.3" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- BepInEx 5 (Mono) -->
+    <Reference Include="BepInEx"><HintPath>$(BepCore)/BepInEx.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="0Harmony"><HintPath>$(BepCore)/0Harmony.dll</HintPath><Private>false</Private></Reference>
+
+    <!-- Game -->
+    <Reference Include="Assembly-CSharp"><HintPath>$(Managed)/Assembly-CSharp.dll</HintPath><Private>false</Private></Reference>
+
+    <!-- Unity -->
+    <Reference Include="UnityEngine"><HintPath>$(Managed)/UnityEngine.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.CoreModule"><HintPath>$(Managed)/UnityEngine.CoreModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.PhysicsModule"><HintPath>$(Managed)/UnityEngine.PhysicsModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="UnityEngine.InputLegacyModule"><HintPath>$(Managed)/UnityEngine.InputLegacyModule.dll</HintPath><Private>false</Private></Reference>
+    <Reference Include="Unity.InputSystem"><HintPath>$(Managed)/Unity.InputSystem.dll</HintPath><Private>false</Private></Reference>
+  </ItemGroup>
+
+</Project>
