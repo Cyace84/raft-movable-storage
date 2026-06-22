@@ -12,8 +12,10 @@ contents** — and drop it somewhere else, using the vanilla build-placement gho
 
 Hotkey is configurable in `BepInEx/config/com.cyace.raftmovablestorage.cfg` (generated on first run).
 
-**Scope:** works in **single-player** and in **multiplayer when you are the host** (others see the
-chest move, contents and all). Moving as a non-host client is not supported yet — see below.
+**Scope:** works in **single-player** and **multiplayer**, whether you are the **host or a client**.
+Only the player *doing* the move needs the mod — it emits the same vanilla network messages the game
+uses for co-op building and chest edits, so the host (modded or not) and everyone else just see a
+normal block move. To merely *see* someone else's move you need no mod at all.
 
 ## Build
 ```bash
@@ -64,9 +66,16 @@ Prior art (`Aidanamite/Building-Utilities`) had a move feature disabled because 
 it relocate with its contents intact; partner needs no mod). Single-player and host MP both confirmed
 live; no dupe, no resource refund, contents preserved.
 
+### Client (non-host) move — how it works
+A client can't mint authoritative object indices, so it mirrors vanilla co-op building:
+1. `RemoveBlockNetwork(original, null, true)` — on a client this `SendP2P`s the removal to the host.
+2. `SendP2P` a `Message_BlockCreator_PlaceBlock` **request** (zero indices) to the host; the host
+   creates the chest authoritatively and replicates it back to everyone, including us.
+3. We don't know the new `ObjectIndex` until that reply spawns it, so we snapshot existing storages
+   and poll `StorageManager.allStorages` for the new one nearest the placed spot (~10 s timeout).
+4. Once found: apply contents to our local view and `SendP2P` a `Message_Storage_Close` (carries the
+   `RGD_Slot[]`) to the host → host applies + relays, so contents land for everyone.
+
 ### Not done yet
-- [ ] **Moving as a non-host client**: `CreateBlockCheat` mints host-authoritative indices, so it is
-      gated to the host (in SP you are the host). A client mover would need the `SendP2P` request
-      path to the host instead. Workaround: host the session.
 - [ ] Generalize beyond `Storage_Small` (works for all chest sizes that are `Storage_Small`-based;
       verify large/special content blocks if desired).

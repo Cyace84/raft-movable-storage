@@ -31,7 +31,7 @@ namespace RaftMovableStorage
     // SCOPE: host / single-player. Multiplayer needs a networked place (Message_BlockCreator_PlaceBlock)
     // plus storage-content sync; CreateBlock(replicating:false) + SetSlotsFromRGD are local-only. TODO.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.1.0")]
+    [BepInPlugin(Guid, "Movable Storages", "1.2.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace.raftmovablestorage";
@@ -47,6 +47,14 @@ namespace RaftMovableStorage
         // renderers/colliders we disabled to hide the original while carrying (restored on cancel)
         private static readonly List<Collider> _hiddenColliders = new List<Collider>();
         private static readonly List<Renderer> _hiddenRenderers = new List<Renderer>();
+
+        // CLIENT (non-host) placement is async: we ask the host to place the chest, then must wait
+        // for the host's reply to spawn it locally before we can push its contents. State for that.
+        private static bool _awaitingClientChest;
+        private static RGD_Slot[] _syncSlots;
+        private static Vector3 _syncPos;
+        private static int _syncDeadlineFrame;
+        private static readonly HashSet<uint> _preExisting = new HashSet<uint>();
 
         private void Awake()
         {
@@ -65,7 +73,7 @@ namespace RaftMovableStorage
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<Ticker>();
 
-            Note($"Movable Storages 1.1.0 loaded. Move key = {MoveKey.Value}.");
+            Note($"Movable Storages 1.2.0 loaded. Move key = {MoveKey.Value}.");
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
@@ -75,6 +83,8 @@ namespace RaftMovableStorage
         // Per-frame logic, driven by Ticker.
         internal static void Tick()
         {
+            if (_awaitingClientChest) PollClientChest();
+
             if (MoveKey.Value.IsDown() || Input.GetKeyDown(KeyCode.M))
             {
                 if (moving != null) { Trace("hotkey: cancel carry."); CancelMove(); }
@@ -192,39 +202,58 @@ namespace RaftMovableStorage
             // verified; contents already captured into `slots`.)
             BlockCreator.RemoveBlockNetwork(original, null, true);
 
-            // NETWORKED PLACE: CreateBlockCheat creates the block locally with proper unique object
-            // indices AND RPCs a Message_BlockCreator_PlaceBlock to all other clients, so they see
-            // the moved chest (plain CreateBlock(...,0,0,0) is local-only — remote players just saw
-            // the original vanish). Host-only: it mints authoritative indices via
-            // SaveAndLoad.GetUniqueObjectIndex(); a non-host client would desync, so we gate on it.
-            var nb = Raft_Network.IsHost
-                ? bc.CreateBlockCheat(item, pos, rot, dps, -1)
-                : bc.CreateBlock(item, pos, rot, dps, -1, false, 0u, 0u, 0u);
-            if (nb is Storage_Small ns && slots != null)
+            if (Raft_Network.IsHost)
             {
-                var inv = ns.GetInventoryReference();
-                if (inv != null) inv.SetSlotsFromRGD(slots);
-
-                // The PlaceBlock RPC carries only geometry, so the replicated chest is EMPTY on
-                // clients. Raft syncs storage contents via Message_Storage_Close (its ctor grabs
-                // GetRGDSlots() and the receiver applies SetSlotsFromRGD). Reuse that exact path to
-                // push the carried inventory to everyone else. (Host authority; reliable+ordered
-                // after the PlaceBlock RPC, so the block exists client-side before slots arrive.)
-                if (Raft_Network.IsHost && player?.Network != null && player.StorageManager != null)
+                // HOST fast-path: CreateBlockCheat mints authoritative unique indices and RPCs a
+                // Message_BlockCreator_PlaceBlock to all clients (plain CreateBlock(...,0,0,0) is
+                // local-only — remotes just saw the original vanish). Then push contents via the
+                // vanilla Message_Storage_Close (its ctor grabs GetRGDSlots, receiver SetSlotsFromRGD).
+                var nb = bc.CreateBlockCheat(item, pos, rot, dps, -1);
+                if (nb is Storage_Small ns && slots != null)
                 {
-                    try
+                    ns.GetInventoryReference()?.SetSlotsFromRGD(slots);
+                    if (player?.Network != null && player.StorageManager != null)
                     {
-                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
-                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        try
+                        {
+                            var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                            player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                        }
+                        catch (System.Exception ex) { Log?.LogWarning("host content-sync RPC failed: " + ex.Message); }
                     }
-                    catch (System.Exception ex) { Log?.LogWarning("content-sync RPC failed: " + ex.Message); }
+                    Note($"placed '{item.UniqueName}' at {pos}; restored {slots.Length} slots (host, networked).");
                 }
-                Note($"placed '{item.UniqueName}' at {pos}; restored {slots.Length} slots" +
-                     (Raft_Network.IsHost ? " (networked)" : " (LOCAL ONLY — not host)") + ".");
+                else
+                {
+                    Log?.LogWarning($"placed '{item?.UniqueName}' but new block is not Storage_Small (nb={(nb == null ? "null" : nb.GetType().Name)}).");
+                }
             }
             else
             {
-                Log?.LogWarning($"placed '{item?.UniqueName}' but new block is not Storage_Small (nb={(nb == null ? "null" : nb.GetType().Name)}).");
+                // CLIENT path: a client can't mint authoritative indices, so it does what vanilla
+                // co-op building does — SendP2P a place REQUEST to the host (0 indices). The host
+                // creates the chest authoritatively and replicates it back to everyone, including us.
+                // We don't know the new ObjectIndex yet, so we snapshot existing storages and poll
+                // (PollClientChest) for the new one near `pos`, then push its contents.
+                if (player?.Network == null) { Log?.LogWarning("client move: no Network_Player/Network."); }
+                else
+                {
+                    _preExisting.Clear();
+                    if (StorageManager.allStorages != null)
+                        foreach (var s in StorageManager.allStorages)
+                            if (s != null) _preExisting.Add(s.ObjectIndex);
+
+                    var req = new Message_BlockCreator_PlaceBlock(
+                        Messages.BlockCreator_PlaceBlock, bc, item.UniqueIndex,
+                        0u, 0u, 0u, pos, rot, -1, dps);
+                    player.SendP2P(req, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+
+                    _syncSlots = slots;
+                    _syncPos = pos;
+                    _awaitingClientChest = slots != null;
+                    _syncDeadlineFrame = Time.frameCount + 600; // ~10s @60fps
+                    Note($"client: asked host to place '{item.UniqueName}'; awaiting chest to sync {slots?.Length ?? 0} slots.");
+                }
             }
 
             // clear state WITHOUT re-activating the (now removed) original, and exit build mode (BUG3)
@@ -232,6 +261,48 @@ namespace RaftMovableStorage
             movingItem = null;
             movingSlots = null;
             ExitBuildMode();
+        }
+
+        // CLIENT content-sync: after we asked the host to place the chest, watch StorageManager for
+        // the new storage (object index not in our pre-place snapshot) nearest the placed spot, then
+        // push our carried contents to the host via the vanilla Message_Storage_Close path and apply
+        // them to our own view. Times out so we never poll forever.
+        private static void PollClientChest()
+        {
+            if (Time.frameCount > _syncDeadlineFrame)
+            {
+                _awaitingClientChest = false; _syncSlots = null;
+                Log?.LogWarning("client sync: timed out waiting for the host to spawn the moved chest.");
+                return;
+            }
+            if (StorageManager.allStorages == null) return;
+
+            Storage_Small best = null;
+            float bestSqr = 1f; // within ~1 unit of where we placed the ghost
+            foreach (var s in StorageManager.allStorages)
+            {
+                if (s == null || _preExisting.Contains(s.ObjectIndex)) continue;
+                float d = (s.transform.localPosition - _syncPos).sqrMagnitude;
+                if (d < bestSqr) { bestSqr = d; best = s; }
+            }
+            if (best == null) return; // host's reply hasn't spawned it yet
+
+            var player = ComponentManager<Network_Player>.Value;
+            if (player?.Network == null) { _awaitingClientChest = false; _syncSlots = null; return; }
+
+            best.GetInventoryReference()?.SetSlotsFromRGD(_syncSlots); // our local view
+            try
+            {
+                if (player.StorageManager != null)
+                {
+                    var msg = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, best);
+                    player.SendP2P(msg, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                }
+                Note($"client sync: pushed {_syncSlots?.Length ?? 0} slots for chest #{best.ObjectIndex}.");
+            }
+            catch (System.Exception ex) { Log?.LogWarning("client sync RPC failed: " + ex.Message); }
+
+            _awaitingClientChest = false; _syncSlots = null;
         }
     }
 
