@@ -62,9 +62,10 @@ Prior art (`Aidanamite/Building-Utilities`) had a move feature disabled because 
 (`GetRGDSlots` / `SetSlotsFromRGD`), which `RGD_Storage` itself uses for save/load.
 
 ## Status
-**Working — user-verified**, including **multiplayer** (host moves a chest → the co-op partner sees
-it relocate with its contents intact; partner needs no mod). Single-player and host MP both confirmed
-live; no dupe, no resource refund, contents preserved.
+**Working — user-verified live**, including full **multiplayer**: single-player, host-initiated, and
+**client-initiated** moves all confirmed with two players — the chest relocates with its contents
+intact, near-instantly, for everyone. No dupe, no resource refund, contents preserved. Only the
+player doing the move needs the mod.
 
 ### Client (non-host) move — how it works
 A client can't mint authoritative object indices, so it mirrors vanilla co-op building:
