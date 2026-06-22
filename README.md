@@ -60,7 +60,9 @@ Prior art (`Aidanamite/Building-Utilities`) had a move feature disabled because 
 (`GetRGDSlots` / `SetSlotsFromRGD`), which `RGD_Storage` itself uses for save/load.
 
 ## Status
-**Working — user-verified** (multiple chests, contents intact, no dupe, no resource refund).
+**Working — user-verified**, including **multiplayer** (host moves a chest → the co-op partner sees
+it relocate with its contents intact; partner needs no mod). Single-player and host MP both confirmed
+live; no dupe, no resource refund, contents preserved.
 
 ### Not done yet
 - [ ] **Moving as a non-host client**: `CreateBlockCheat` mints host-authoritative indices, so it is
