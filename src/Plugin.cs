@@ -31,7 +31,7 @@ namespace RaftMovableStorage
     // SCOPE: host / single-player. Multiplayer needs a networked place (Message_BlockCreator_PlaceBlock)
     // plus storage-content sync; CreateBlock(replicating:false) + SetSlotsFromRGD are local-only. TODO.
 
-    [BepInPlugin(Guid, "Movable Storages", "1.0.0")]
+    [BepInPlugin(Guid, "Movable Storages", "1.1.0")]
     public class Plugin : BaseUnityPlugin
     {
         public const string Guid = "com.cyace.raftmovablestorage";
@@ -65,7 +65,7 @@ namespace RaftMovableStorage
             go.hideFlags = HideFlags.HideAndDontSave;
             go.AddComponent<Ticker>();
 
-            Note($"Movable Storages 1.0.0 loaded. Move key = {MoveKey.Value}.");
+            Note($"Movable Storages 1.1.0 loaded. Move key = {MoveKey.Value}.");
         }
 
         // Info = user-facing milestones; Trace = diagnostic non-events (missed raycast, bad spot).
@@ -179,6 +179,7 @@ namespace RaftMovableStorage
             var dps = movingDps;
             var slots = movingSlots;
             var original = moving;
+            var player = ComponentManager<Network_Player>.Value;
 
             // The original is about to be destroyed; drop the hide-bookkeeping (nothing to restore).
             _hiddenColliders.Clear();
@@ -191,12 +192,35 @@ namespace RaftMovableStorage
             // verified; contents already captured into `slots`.)
             BlockCreator.RemoveBlockNetwork(original, null, true);
 
-            var nb = bc.CreateBlock(item, pos, rot, dps, -1, false, 0u, 0u, 0u);
+            // NETWORKED PLACE: CreateBlockCheat creates the block locally with proper unique object
+            // indices AND RPCs a Message_BlockCreator_PlaceBlock to all other clients, so they see
+            // the moved chest (plain CreateBlock(...,0,0,0) is local-only — remote players just saw
+            // the original vanish). Host-only: it mints authoritative indices via
+            // SaveAndLoad.GetUniqueObjectIndex(); a non-host client would desync, so we gate on it.
+            var nb = Raft_Network.IsHost
+                ? bc.CreateBlockCheat(item, pos, rot, dps, -1)
+                : bc.CreateBlock(item, pos, rot, dps, -1, false, 0u, 0u, 0u);
             if (nb is Storage_Small ns && slots != null)
             {
                 var inv = ns.GetInventoryReference();
                 if (inv != null) inv.SetSlotsFromRGD(slots);
-                Note($"placed '{item.UniqueName}' at {pos}; restored {slots.Length} slots.");
+
+                // The PlaceBlock RPC carries only geometry, so the replicated chest is EMPTY on
+                // clients. Raft syncs storage contents via Message_Storage_Close (its ctor grabs
+                // GetRGDSlots() and the receiver applies SetSlotsFromRGD). Reuse that exact path to
+                // push the carried inventory to everyone else. (Host authority; reliable+ordered
+                // after the PlaceBlock RPC, so the block exists client-side before slots arrive.)
+                if (Raft_Network.IsHost && player?.Network != null && player.StorageManager != null)
+                {
+                    try
+                    {
+                        var sync = new Message_Storage_Close(Messages.StorageManager_Close, player.StorageManager, ns);
+                        player.Network.RPC(sync, Target.Other, Steamworks.EP2PSend.k_EP2PSendReliable, NetworkChannel.Channel_Game);
+                    }
+                    catch (System.Exception ex) { Log?.LogWarning("content-sync RPC failed: " + ex.Message); }
+                }
+                Note($"placed '{item.UniqueName}' at {pos}; restored {slots.Length} slots" +
+                     (Raft_Network.IsHost ? " (networked)" : " (LOCAL ONLY — not host)") + ".");
             }
             else
             {

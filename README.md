@@ -12,8 +12,8 @@ contents** — and drop it somewhere else, using the vanilla build-placement gho
 
 Hotkey is configurable in `BepInEx/config/com.cyace.raftmovablestorage.cfg` (generated on first run).
 
-**Scope:** works on **host / single-player**. Multiplayer (placing for remote clients) is not yet
-supported — see below.
+**Scope:** works in **single-player** and in **multiplayer when you are the host** (others see the
+chest move, contents and all). Moving as a non-host client is not supported yet — see below.
 
 ## Build
 ```bash
@@ -32,11 +32,16 @@ All API verified by decompiling the game's `Assembly-CSharp.dll` (`DOTNET_ROOT=$
 | Hide original | disable its `Renderer.enabled` + `Collider.enabled` (NOT `SetActive`) |
 | Show ghost | `BlockCreator.SetBlockTypeToBuild(Item_Base)` (positions `selectedBlock`) |
 | Remove original | `BlockCreator.RemoveBlockNetwork(block, **null**, true)` (static, networked) |
-| Recreate | `BlockCreator.CreateBlock(item, pos, rot, dps, -1, false, 0,0,0)` |
+| Recreate (networked) | host: `BlockCreator.CreateBlockCheat(item, pos, rot, dps, -1)` |
 | Restore contents | `newStorage.GetInventoryReference().SetSlotsFromRGD(slots)` |
+| Sync contents to clients | RPC `Message_Storage_Close(StorageManager_Close, player.StorageManager, newStorage)` to `Target.Other` |
 
-`CreateBlock` self-generates the `0` indices and calls `OnFinishedPlacement()` synchronously, so the
-new storage's inventory exists immediately after the call returns.
+`CreateBlockCheat` mints authoritative unique object indices (`SaveAndLoad.GetUniqueObjectIndex()`)
+and RPCs a `Message_BlockCreator_PlaceBlock` to other clients, then creates locally — so the move
+replicates. (Plain `CreateBlock(...,0,0,0)` is local-only: remote players just see the original
+vanish.) The PlaceBlock RPC carries only geometry, so the replicated chest is empty until we push
+contents via `Message_Storage_Close` — the same message vanilla uses on chest close (its ctor grabs
+`GetRGDSlots()`; the receiver applies `SetSlotsFromRGD`).
 
 ### Three hard-won gotchas (all cost a dupe/refund bug)
 1. **Don't hide the original with `SetActive(false)`** — that de-registers the block, so the later
@@ -58,8 +63,8 @@ Prior art (`Aidanamite/Building-Utilities`) had a move feature disabled because 
 **Working — user-verified** (multiple chests, contents intact, no dupe, no resource refund).
 
 ### Not done yet
-- [ ] **Multiplayer**: `CreateBlock(replicating:false)` + `SetSlotsFromRGD` are local-only, so remote
-      clients won't see the moved chest (or would see it empty). Needs a networked place
-      (`Message_BlockCreator_PlaceBlock`) + storage-content sync. Host/SP is unaffected.
+- [ ] **Moving as a non-host client**: `CreateBlockCheat` mints host-authoritative indices, so it is
+      gated to the host (in SP you are the host). A client mover would need the `SendP2P` request
+      path to the host instead. Workaround: host the session.
 - [ ] Generalize beyond `Storage_Small` (works for all chest sizes that are `Storage_Small`-based;
       verify large/special content blocks if desired).
